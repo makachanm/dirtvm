@@ -6,7 +6,88 @@
 #include <iostream>  // For std::cerr
 #include <vector>    // For std::vector
 #include <string>    // For std::string
-#include <cstdint>   // For uint16_t, uint64_t etc.
+#include <cstdint>
+#include <map>
+#include <variant>
+
+__uint128_t string_to_uint128(const std::string &s) {
+    __uint128_t res = 0;
+    size_t i = 0;
+    bool is_hex = false;
+
+    if (s.rfind("0x", 0) == 0) {
+        is_hex = true;
+        i = 2;
+    }
+
+    for (; i < s.length(); ++i) {
+        char c = s[i];
+        if (is_hex) {
+            if (c >= '0' && c <= '9') {
+                res = res * 16 + (c - '0');
+            } else if (c >= 'a' && c <= 'f') {
+                res = res * 16 + (c - 'a' + 10);
+            } else if (c >= 'A' && c <= 'F') {
+                res = res * 16 + (c - 'A' + 10);
+            }
+        } else {
+            if (c >= '0' && c <= '9') {
+                res = res * 10 + (c - '0');
+            }
+        }
+    }
+    return res;
+}
+
+// Opcodes map
+const std::map<std::string, uint16_t> opcodes = {
+    {"add", 0b0000010000000000},
+    {"sub", 0b0000100000000000},
+    {"mul", 0b0000110000000000},
+    {"div", 0b0001000000000000},
+    {"pop", 0b0001100000000000},
+    {"dup", 0b0001110000000000},
+    {"jmp", 0b0010000000000000},
+    {"jz", 0b0010010000000000},
+    {"jnz", 0b0010100000000000},
+    {"call", 0b0010110000000000},
+    {"ret", 0b0011000000000000},
+    {"eq", 0b0011010000000000},
+    {"lt", 0b0011100000000000},
+    {"gt", 0b0011110000000000},
+    {"gload", 0b0100000000000000},
+    {"gstore", 0b0100010000000000},
+    {"lload", 0b0100100000000000},
+    {"lstore", 0b0100110000000000},
+    {"pushd8", 0b0101000000000000},
+    {"pushd16", 0b0101010000000000},
+    {"pushd32", 0b0101100000000000},
+    {"pushd64", 0b0101110000000000},
+    {"pushd128", 0b0110000000000000},
+    {"syscall", 0b0110010000000000},
+};
+
+std::string unescape_string(const std::string& s) {
+    std::string res;
+    for (size_t i = 0; i < s.length(); ++i) {
+        if (s[i] == '\\' && i + 1 < s.length()) {
+            switch (s[++i]) {
+                case 'n': res += '\n'; break;
+                case 't': res += '\t'; break;
+                case 'r': res += '\r'; break;
+                case '0': res += '\0'; break;
+                case '\\': res += '\\'; break;
+                case '\'': res += '\''; break;
+                case '"': res += '"'; break;
+                default: res += s[i]; break;
+            }
+        } else {
+            res += s[i];
+        }
+    }
+    return res;
+}
+
 
 // Helper function to trim whitespace from a string
 static inline void trim(std::string &s) {
@@ -56,261 +137,330 @@ bool parseCharLiteral(const std::string& s, uint8_t& out_char) {
 
 
 void Parser::split_token(std::string input) {
-    trim(input); // Trim leading/trailing whitespace
-
-    if (input.empty()) {
-        return; // Skip empty lines
-    }
-
-    // Handle comments: assume ';' denotes a comment until end of line
+    trim(input);
     size_t comment_pos = input.find(';');
     if (comment_pos != std::string::npos) {
-        input = input.substr(0, comment_pos); // Truncate at comment
-        trim(input); // Trim again in case comment was preceded by spaces
+        input = input.substr(0, comment_pos);
+        trim(input);
     }
-
     if (input.empty()) {
-        return; // Skip lines that were only comments or whitespace
+        return;
     }
 
-    std::stringstream ss(input);
-    std::string token_str;
-    while (ss >> token_str) {
-        this->tokens.push_back(token_str);
+    std::string current_token;
+    bool in_string = false;
+    for (size_t i = 0; i < input.length(); ++i) {
+        char c = input[i];
+
+        if (c == '"' && (i == 0 || input[i-1] != '\\')) {
+            if (in_string) {
+                // End of string
+                current_token += c;
+                tokens.push_back(current_token);
+                current_token.clear();
+                in_string = false;
+            } else {
+                // Start of string
+                if (!current_token.empty()) {
+                    tokens.push_back(current_token);
+                    current_token.clear();
+                }
+                current_token += c;
+                in_string = true;
+            }
+        } else if ((std::isspace(c) || c == ',') && !in_string) {
+            if (!current_token.empty()) {
+                tokens.push_back(current_token);
+                current_token.clear();
+            }
+        } else {
+            current_token += c;
+        }
+    }
+
+    if (!current_token.empty()) {
+        if (in_string) {
+            std::cerr << "Error: Unterminated string literal." << std::endl;
+            exit(1);
+        }
+        tokens.push_back(current_token);
     }
 }
 
-// Add stubs for other Parser methods to ensure the file compiles,
-// assuming they will be implemented later or are not critical for this specific task.
 Parser::Parser() {}
 Parser::~Parser() {}
+std::map<std::string, __uint128_t> label_addresses;
 
 void Parser::parse(std::string input_assembly_code) {
-    // Clear previous tokens before parsing new input
     this->tokens.clear();
+    this->instructions.clear();
 
     std::stringstream ss(input_assembly_code);
     std::string line;
     while (std::getline(ss, line)) {
         split_token(line);
     }
+    first_pass();
+    token_to_data();
 }
 
-std::vector<uint16_t> Parser::get_bytecode() {
-    std::vector<uint16_t> bytecode;
-    // Iterate through tokens using an index to allow consuming multiple tokens (opcode + data)
+void Parser::token_to_data() {
+    instructions.clear(); // 두 번째 패스를 위해 비웁니다.
+    for (size_t i = 0; i < tokens.size(); ++i) {
+        const std::string& token = tokens[i];
+        if (token == ".string") {
+            if (i + 2 >= tokens.size()) { std::cerr << "Error: .string requires an address and a string literal." << std::endl; exit(1); }
+            
+            uint16_t address = std::stoul(tokens[++i]);
+            std::string str_literal = tokens[++i];
+
+            if (str_literal.front() != '"' || str_literal.back() != '"') { std::cerr << "Error: Expected string literal for .string." << std::endl; exit(1); }
+            
+            Instruction instr;
+            instr.type = InstructionType::STRING;
+            String s;
+            s.address = address;
+            s.value = unescape_string(str_literal.substr(1, str_literal.length() - 2));
+            instr.args = s;
+            instructions.push_back(instr);
+        } else if (token == "pushd8") {
+            if (++i >= tokens.size()) { std::cerr << "Error: Expected 8-bit data after pushd8." << std::endl; exit(1); }
+            uint8_t val;
+            if (parseCharLiteral(tokens[i], val)) {
+                instructions.push_back({InstructionType::PUSH8, Pushd8{val}});
+            } else {
+                instructions.push_back({InstructionType::PUSH8, Pushd8{(uint8_t)std::stoul(tokens[i], nullptr, 0)}});
+            }
+        } else if (token == "pushd16") {
+            if (++i >= tokens.size()) { std::cerr << "Error: Expected 16-bit data after pushd16." << std::endl; exit(1); }
+            instructions.push_back({InstructionType::PUSH16, Pushd16{(uint16_t)std::stoul(tokens[i], nullptr, 0)}});
+        } else if (token == "pushd128") {
+            if (++i >= tokens.size()) { std::cerr << "Error: Expected 128-bit data after pushd128." << std::endl; exit(1); }
+            instructions.push_back({InstructionType::PUSH128, Pushd128{string_to_uint128(tokens[i])}});
+        } else if (token == "pushd32") {
+            if (++i >= tokens.size()) { std::cerr << "Error: Expected 32-bit data after pushd32." << std::endl; exit(1); }
+            instructions.push_back({InstructionType::PUSH32, Pushd32{(uint32_t)std::stoul(tokens[i], nullptr, 0)}});
+        } else if (token == "pushd64") {
+            if (++i >= tokens.size()) { std::cerr << "Error: Expected 64-bit data after pushd64." << std::endl; exit(1); }
+            instructions.push_back({InstructionType::PUSH64, Pushd64{(uint64_t)string_to_uint128(tokens[i])}});
+        } else if (token == "jmp") { 
+            if (++i >= tokens.size()) { std::cerr << "Error: Expected 128-bit data after jmp." << std::endl; exit(1); }
+            if (label_addresses.count(tokens[i])) {
+                instructions.push_back({InstructionType::JMP, Pushd128{label_addresses.at(tokens[i])}});
+            } else {
+                instructions.push_back({InstructionType::JMP, Pushd128{string_to_uint128(tokens[i])}});
+            }
+        } else if (token == "gstore") {
+            instructions.push_back({InstructionType::GSTORE, Gstore{}});
+        } else if (token == "syscall") {
+            if (++i >= tokens.size()) { std::cerr << "Error: Expected syscall number after syscall." << std::endl; exit(1); }
+            instructions.push_back({InstructionType::SYSCALL, Syscall{(uint8_t)std::stoul(tokens[i], nullptr, 0)}});
+        } else if (token == "lload") {
+            if (++i >= tokens.size()) { std::cerr << "Error: Expected 10-bit tag after lload." << std::endl; exit(1); }
+            instructions.push_back({InstructionType::LLOAD, Lload{(uint16_t)std::stoul(tokens[i], nullptr, 0)}});
+        } else if (token == "lstore") {
+            if (++i >= tokens.size()) { std::cerr << "Error: Expected 10-bit tag after lstore." << std::endl; exit(1); }
+            instructions.push_back({InstructionType::LSTORE, Lstore{(uint16_t)std::stoul(tokens[i], nullptr, 0)}});
+        } else if (token == "call" || token == "jz" || token == "jnz") {
+            if (++i >= tokens.size()) { std::cerr << "Error: Expected address after " << token << std::endl; exit(1); }
+            __uint128_t address;
+            if (label_addresses.count(tokens[i])) {
+                address = label_addresses.at(tokens[i]);
+            } else {
+                address = string_to_uint128(tokens[i]);
+            }
+            if (token == "call") instructions.push_back({InstructionType::CALL, Pushd128{address}});
+            else if (token == "jz") instructions.push_back({InstructionType::JZ, Pushd128{address}});
+            else if (token == "jnz") instructions.push_back({InstructionType::JNZ, Pushd128{address}});
+        } else {
+             if (opcodes.count(token)) {
+                Instruction instr;
+                instr.type = InstructionType::OPCODE;
+                instr.args = Opcode{opcodes.at(token)};
+                instructions.push_back(instr);
+             } else if (token.back() == ':') {
+                // 라벨 정의는 두 번째 패스에서 무시합니다.
+                continue;
+             } else {
+                std::cerr << "Unknown token: " << token << std::endl;
+                exit(1);
+            }
+        }
+    }
+}
+
+void Parser::first_pass() {
+    label_addresses.clear();
+    __uint128_t current_address = 0;
+
     for (size_t i = 0; i < tokens.size(); ++i) {
         const std::string& token = tokens[i];
 
-        if (token == "add") {
-            bytecode.push_back(0b000001);
-        } else if (token == "sub") {
-            bytecode.push_back(0b000010);
-        } else if (token == "mul") {
-            bytecode.push_back(0b000011);
-        } else if (token == "div") {
-            bytecode.push_back(0b000100);
-        } else if (token == "pop") {
-            bytecode.push_back(0b000110);
-        } else if (token == "dup") {
-            bytecode.push_back(0b000111);
-        } else if (token == "jmp") {
-            bytecode.push_back(0b001000);
-            if (++i >= tokens.size()) { // Move to next token (data)
-                std::cerr << "Error: Expected 128-bit data after pushd128." << std::endl;
-                exit(1);
-            }
-            std::vector<uint16_t> data_parts = token_to_data(tokens[i], 128);
-            bytecode.insert(bytecode.end(), data_parts.begin(), data_parts.end());
-        } else if (token == "jz") {
-            bytecode.push_back(0b001001);
-        } else if (token == "jnz") {
-            bytecode.push_back(0b001010);
-        } else if (token == "call") {
-            bytecode.push_back(0b001011);
-        } else if (token == "ret") {
-            bytecode.push_back(0b001100);
-        } else if (token == "eq") {
-            bytecode.push_back(0b001101);
-        } else if (token == "lt") {
-            bytecode.push_back(0b001110);
-        } else if (token == "gt") {
-            bytecode.push_back(0b001111);
-        } else if (token == "gload") {
-            bytecode.push_back(0b010000);
-        } else if (token == "gstore") {
-            bytecode.push_back(0b010001);
-        } else if (token == "lload") {
-            bytecode.push_back(0b010010);
-        } else if (token == "lstore") {
-            bytecode.push_back(0b010011);
+        if (token.back() == ':') {
+            std::string label = token.substr(0, token.length() - 1);
+            label_addresses[label] = current_address;
+        } else if (token == ".string") {
+            if (i + 2 >= tokens.size()) { std::cerr << "Error: .string requires an address and a string literal." << std::endl; exit(1); }
+            std::string str_literal = tokens[i+2];
+            std::string unescaped = unescape_string(str_literal.substr(1, str_literal.length() - 2));
+            current_address += unescaped.length() * 5; // pushd8(2) + pushd16(2) + gstore(1) = 5 words per char
+            i += 2;
         } else if (token == "pushd8") {
-            bytecode.push_back(0b010100);
-            if (++i >= tokens.size()) { // Move to next token (data)
-                std::cerr << "Error: Expected 8-bit data after pushd8." << std::endl;
-                exit(1);
-            }
-            std::vector<uint16_t> data_parts = token_to_data(tokens[i], 8);
-            bytecode.insert(bytecode.end(), data_parts.begin(), data_parts.end());
+            current_address += 2; // Instruction word + data word
+            i += 1;
         } else if (token == "pushd16") {
-            bytecode.push_back(0b010101);
-            if (++i >= tokens.size()) { // Move to next token (data)
-                std::cerr << "Error: Expected 16-bit data after pushd16." << std::endl;
-                exit(1);
-            }
-            std::vector<uint16_t> data_parts = token_to_data(tokens[i], 16);
-            bytecode.insert(bytecode.end(), data_parts.begin(), data_parts.end());
+            current_address += 2;
+            i += 1;
         } else if (token == "pushd32") {
-            bytecode.push_back(0b010110);
-            if (++i >= tokens.size()) { // Move to next token (data)
-                std::cerr << "Error: Expected 32-bit data after pushd32." << std::endl;
-                exit(1);
-            }
-            std::vector<uint16_t> data_parts = token_to_data(tokens[i], 32);
-            bytecode.insert(bytecode.end(), data_parts.begin(), data_parts.end());
+            current_address += 3;
+            i += 1;
         } else if (token == "pushd64") {
-            bytecode.push_back(0b010111);
-            if (++i >= tokens.size()) { // Move to next token (data)
-                std::cerr << "Error: Expected 64-bit data after pushd64." << std::endl;
-                exit(1);
-            }
-            std::vector<uint16_t> data_parts = token_to_data(tokens[i], 64);
-            bytecode.insert(bytecode.end(), data_parts.begin(), data_parts.end());
+            current_address += 5;
+            i += 1;
         } else if (token == "pushd128") {
-            bytecode.push_back(0b011000);
-            if (++i >= tokens.size()) { // Move to next token (data)
-                std::cerr << "Error: Expected 128-bit data after pushd128." << std::endl;
-                exit(1);
-            }
-            std::vector<uint16_t> data_parts = token_to_data(tokens[i], 128);
-            bytecode.insert(bytecode.end(), data_parts.begin(), data_parts.end());
+            current_address += 9;
+            i += 1;
+        } else if (token == "jmp" || token == "call" || token == "jz" || token == "jnz") {
+            current_address += 9; // opcode + 8-word address
+            i += 1;
         } else if (token == "syscall") {
-            bytecode.push_back(0b011001);
+            current_address += 1;
+            i += 1;
+        } else if (token == "lload" || token == "lstore") {
+            current_address += 1;
+            i += 1;
+        } else if (opcodes.count(token)) {
+            current_address += 1;
         } else {
-            // If it's not a recognized opcode, it's an error.
-            std::cerr << "Unknown token: " << token << std::endl;
-            exit(1);
+            // Unknown token or already handled (like label value)
         }
     }
+}
 
+
+std::vector<uint16_t> Parser::get_bytecode() {
+    std::vector<uint16_t> bytecode;
+    for (const auto& instr : instructions) {
+        switch (instr.type) {
+            case InstructionType::PUSH8:
+                bytecode.push_back(opcodes.at("pushd8"));
+                bytecode.push_back(std::get<Pushd8>(instr.args).value);
+                break;
+            case InstructionType::PUSH16:
+                bytecode.push_back(opcodes.at("pushd16"));
+                bytecode.push_back(std::get<Pushd16>(instr.args).value);
+                break;
+            case InstructionType::PUSH32:
+                {
+                    bytecode.push_back(opcodes.at("pushd32"));
+                    uint32_t value = std::get<Pushd32>(instr.args).value;
+                    bytecode.push_back(value & 0xFFFF);
+                    bytecode.push_back((value >> 16) & 0xFFFF);
+                }
+                break;
+            case InstructionType::PUSH64:
+                {
+                    bytecode.push_back(opcodes.at("pushd64"));
+                    uint64_t value = std::get<Pushd64>(instr.args).value;
+                    bytecode.push_back(value & 0xFFFF);
+                    bytecode.push_back((value >> 16) & 0xFFFF);
+                    bytecode.push_back((value >> 32) & 0xFFFF);
+                    bytecode.push_back((value >> 48) & 0xFFFF);
+                }
+                break;
+            case InstructionType::PUSH128:
+                {
+                    bytecode.push_back(opcodes.at("pushd128"));
+                    __uint128_t value = std::get<Pushd128>(instr.args).value;
+                    uint64_t low = (uint64_t)value;
+                    uint64_t high = (uint64_t)(value >> 64);
+                    bytecode.push_back(low & 0xFFFF);
+                    bytecode.push_back((low >> 16) & 0xFFFF);
+                    bytecode.push_back((low >> 32) & 0xFFFF);
+                    bytecode.push_back((low >> 48) & 0xFFFF);
+                    bytecode.push_back(high & 0xFFFF);
+                    bytecode.push_back((high >> 16) & 0xFFFF);
+                    bytecode.push_back((high >> 32) & 0xFFFF);
+                    bytecode.push_back((high >> 48) & 0xFFFF);
+                }
+                break;
+            case InstructionType::CALL:
+            case InstructionType::JZ:
+            case InstructionType::JNZ:
+                {
+                    if (instr.type == InstructionType::CALL) bytecode.push_back(opcodes.at("call"));
+                    else if (instr.type == InstructionType::JZ) bytecode.push_back(opcodes.at("jz"));
+                    else if (instr.type == InstructionType::JNZ) bytecode.push_back(opcodes.at("jnz"));
+
+                    __uint128_t value = std::get<Pushd128>(instr.args).value;
+                    uint64_t low = (uint64_t)value;
+                    uint64_t high = (uint64_t)(value >> 64);
+                    bytecode.push_back(low & 0xFFFF);
+                    bytecode.push_back((low >> 16) & 0xFFFF);
+                    bytecode.push_back((low >> 32) & 0xFFFF);
+                    bytecode.push_back((low >> 48) & 0xFFFF);
+                    bytecode.push_back(high & 0xFFFF);
+                    bytecode.push_back((high >> 16) & 0xFFFF);
+                    bytecode.push_back((high >> 32) & 0xFFFF);
+                    bytecode.push_back((high >> 48) & 0xFFFF);
+                }
+                break;
+            case InstructionType::JMP:
+                {
+                bytecode.push_back(opcodes.at("jmp"));
+                __uint128_t value = std::get<Pushd128>(instr.args).value;
+                uint64_t jlow = (uint64_t)value;
+                uint64_t jhigh = (uint64_t)(value >> 64);
+                bytecode.push_back(jlow & 0xFFFF);
+                bytecode.push_back((jlow >> 16) & 0xFFFF);
+                bytecode.push_back((jlow >> 32) & 0xFFFF);
+                bytecode.push_back((jlow >> 48) & 0xFFFF);
+                bytecode.push_back(jhigh & 0xFFFF);
+                bytecode.push_back((jhigh >> 16) & 0xFFFF);
+                bytecode.push_back((jhigh >> 32) & 0xFFFF);
+                bytecode.push_back((jhigh >> 48) & 0xFFFF);
+                }
+                break;
+            case InstructionType::GSTORE:
+                bytecode.push_back(opcodes.at("gstore"));
+                break;
+            case InstructionType::SYSCALL:
+                // syscall opcode와 syscall 번호를 하나의 16비트 명령어로 합칩니다.
+                // Opcode: 6 bits, Syscall number: 10 bits
+                bytecode.push_back(opcodes.at("syscall") | (std::get<Syscall>(instr.args).value & 0x03FF));
+                break;
+            case InstructionType::LLOAD:
+                {
+                    uint16_t tag = std::get<Lload>(instr.args).tag;
+                    bytecode.push_back(opcodes.at("lload") | (tag & 0x3FF));
+                }
+                break;
+            case InstructionType::LSTORE:
+                {
+                    uint16_t tag = std::get<Lstore>(instr.args).tag;
+                    bytecode.push_back(opcodes.at("lstore") | (tag & 0x3FF));
+                }
+                break;
+            case InstructionType::STRING:
+                {
+                    const auto& s = std::get<String>(instr.args);
+                    uint16_t current_address = s.address;
+                    for (char c : s.value) {
+                        // pushd8 'c'
+                        bytecode.push_back(opcodes.at("pushd8"));
+                        bytecode.push_back(static_cast<uint8_t>(c));
+                        // pushd16 address
+                        bytecode.push_back(opcodes.at("pushd16"));
+                        bytecode.push_back(current_address++);
+                        // gstore
+                        bytecode.push_back(opcodes.at("gstore"));
+                    }
+                }
+                break;
+            case InstructionType::OPCODE:
+                bytecode.push_back(std::get<Opcode>(instr.args).code);
+                break;
+        }
+    }
     return bytecode;
-}
-
-// Function to parse a 128-bit hexadecimal string into two uint64_t
-// Assumes input string is like "0x..." or just "..." (hex).
-// Returns true on success, false on failure. Stores result in high and low.
-bool parseUInt128Hex(const std::string& s, uint64_t& high, uint64_t& low) {
-    std::string hex_str = s;
-    if (hex_str.rfind("0x", 0) == 0 || hex_str.rfind("0X", 0) == 0) {
-        hex_str = hex_str.substr(2); // Remove "0x" prefix
-    }
-
-    if (hex_str.empty() || hex_str.length() > 32) { // Max 32 hex chars for 128 bits
-        return false;
-    }
-
-    // Pad with leading zeros if necessary
-    if (hex_str.length() < 32) {
-        hex_str = std::string(32 - hex_str.length(), '0') + hex_str;
-    }
-
-    try {
-        high = std::stoull(hex_str.substr(0, 16), nullptr, 16); // First 16 hex chars for high 64 bits
-        low = std::stoull(hex_str.substr(16, 16), nullptr, 16); // Next 16 hex chars for low 64 bits
-    } catch (const std::invalid_argument& e) {
-        return false;
-    } catch (const std::out_of_range& e) {
-        return false; // Should not happen with 16 hex chars
-    }
-
-    return true;
-}
-
-
-std::vector<uint16_t> Parser::token_to_data(std::string input, size_t size) {
-    std::vector<uint16_t> result;
-    uint8_t char_val;
-
-    // Try to parse as a character literal first, especially if size is 8
-    if (size == 8 && parseCharLiteral(input, char_val)) {
-        result.push_back(static_cast<uint16_t>(char_val));
-        return result;
-    }
-
-    // Handle 128-bit integers as a special case before stoull
-    if (size == 128) {
-        uint64_t high_64 = 0, low_64 = 0;
-        if (parseUInt128Hex(input, high_64, low_64)) {
-            // Append low_64 first (little-endian for uint16_t parts)
-            result.push_back(static_cast<uint16_t>(low_64 & 0xFFFF));
-            result.push_back(static_cast<uint16_t>((low_64 >> 16) & 0xFFFF));
-            result.push_back(static_cast<uint16_t>((low_64 >> 32) & 0xFFFF));
-            result.push_back(static_cast<uint16_t>((low_64 >> 48) & 0xFFFF));
-            // Then high_64
-            result.push_back(static_cast<uint16_t>(high_64 & 0xFFFF));
-            result.push_back(static_cast<uint16_t>((high_64 >> 16) & 0xFFFF));
-            result.push_back(static_cast<uint16_t>((high_64 >> 32) & 0xFFFF));
-            result.push_back(static_cast<uint16_t>((high_64 >> 48) & 0xFFFF));
-            return result;
-        } else {
-            // Fallback for 128-bit if not a valid hex, try stoull but expect failure
-            // This caters to decimal 128-bit numbers that are too big for unsigned long long
-            // and where `parseUInt128Hex` fails.
-            std::cerr << "Invalid or unsupported 128-bit numeric format (only hex supported for 128-bit literals currently): " << input << std::endl;
-            exit(1);
-        }
-    }
-
-
-    unsigned long long value;
-    try {
-        value = std::stoull(input, nullptr, 0); // Base 0 to auto-detect decimal/hex
-    } catch (const std::invalid_argument& e) {
-        std::cerr << "Invalid numeric format for data: " << input << std::endl;
-        exit(1);
-    } catch (const std::out_of_range& e) {
-        // This should primarily catch decimal numbers larger than ULLONG_MAX,
-        // as hex numbers up to 64-bit should be handled.
-        std::cerr << "Numeric data out of range for unsigned long long (for sizes < 128): " << input << std::endl;
-        exit(1);
-    }
-
-    // Determine how to store the value based on the size
-    switch (size) {
-        case 8:
-            if (value > 0xFF) {
-                std::cerr << "Value " << input << " exceeds 8-bit capacity." << std::endl;
-                exit(1);
-            }
-            result.push_back(static_cast<uint16_t>(value & 0xFF));
-            break;
-        case 16:
-            if (value > 0xFFFF) {
-                std::cerr << "Value " << input << " exceeds 16-bit capacity." << std::endl;
-                exit(1);
-            }
-            result.push_back(static_cast<uint16_t>(value & 0xFFFF));
-            break;
-        case 32:
-            if (value > 0xFFFFFFFFULL) { // Use ULL suffix for comparison with unsigned long long
-                std::cerr << "Value " << input << " exceeds 32-bit capacity." << std::endl;
-                exit(1);
-            }
-            result.push_back(static_cast<uint16_t>(value & 0xFFFF));         // Lower 16 bits
-            result.push_back(static_cast<uint16_t>((value >> 16) & 0xFFFF)); // Upper 16 bits
-            break;
-        case 64:
-            // No explicit overflow check needed here as value is already unsigned long long
-            // and we are extracting all 64 bits.
-            result.push_back(static_cast<uint16_t>(value & 0xFFFF));
-            result.push_back(static_cast<uint16_t>((value >> 16) & 0xFFFF));
-            result.push_back(static_cast<uint16_t>((value >> 32) & 0xFFFF));
-            result.push_back(static_cast<uint16_t>((value >> 48) & 0xFFFF));
-            break;
-        default:
-            std::cerr << "Unsupported data size in token_to_data: " << size << std::endl;
-            exit(1);
-    }
-
-    return result;
 }

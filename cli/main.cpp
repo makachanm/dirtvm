@@ -1,12 +1,12 @@
 #include <iostream>
 #include <fstream>
 #include <vector>
+#include <iterator>
 #include <string>
 #include <map>
 
 #include "../assembler/parser.h"
 #include "../engine/vm.h"
-#include "../engine/object.h" // For stack_data
 
 enum class CliMode {
     NONE,
@@ -25,7 +25,62 @@ void print_help() {
     std::cout << "  -h, --help           Display this help message" << std::endl;
 }
 
+// 파일에서 어셈블리 코드를 읽어옵니다.
+std::string read_source_file(const std::string& filename) {
+    std::ifstream ifs(filename);
+    if (!ifs.is_open()) {
+        std::cerr << "Error: Could not open input file " << filename << std::endl;
+        exit(1);
+    }
+    return std::string((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+}
+
+// 바이트코드 파일에서 바이트코드를 읽어옵니다.
+std::vector<uint16_t> read_bytecode_file(const std::string& filename) {
+    std::ifstream ifs(filename, std::ios::binary);
+    if (!ifs.is_open()) {
+        std::cerr << "Error: Could not open input bytecode file " << filename << std::endl;
+        exit(1);
+    }
+    std::vector<uint16_t> bytecode;
+    uint16_t instruction;
+    while (ifs.read(reinterpret_cast<char*>(&instruction), sizeof(instruction))) {
+        bytecode.push_back(instruction);
+    }
+    return bytecode;
+}
+
+// 어셈블리 코드를 바이트코드로 변환합니다.
+std::vector<uint16_t> assemble(const std::string& assembly_code) {
+    Parser parser;
+    parser.parse(assembly_code);
+    return parser.get_bytecode();
+}
+
+// 바이트코드를 파일에 씁니다.
+void write_bytecode(const std::string& filename, const std::vector<uint16_t>& bytecode) {
+    std::ofstream ofs(filename, std::ios::binary);
+    if (!ofs.is_open()) {
+        std::cerr << "Error: Could not open output file " << filename << std::endl;
+        exit(1);
+    }
+    for (uint16_t instruction : bytecode) {
+        ofs.write(reinterpret_cast<const char*>(&instruction), sizeof(instruction));
+    }
+    std::cout << "Assembly successful. Bytecode written to " << filename << std::endl;
+}
+
+// VM을 실행합니다.
+void run_vm(const std::vector<uint16_t>& bytecode) {
+    vm dirt_vm(bytecode);
+    dirt_vm.run();
+    std::cout << "Execution finished." << std::endl;
+}
+
 int main(int argc, char* argv[]) {
+    // C++ 스트림과 C 표준 스트림의 동기화를 비활성화하여 입출력 성능을 향상시킵니다.
+    std::ios_base::sync_with_stdio(false);
+
     CliMode mode = CliMode::NONE;
     std::string input_file;
     std::string output_file = "a.out"; // Default output file for assembly
@@ -72,73 +127,34 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    std::cout << "Mode: ";
-    if (mode == CliMode::ASSEMBLE) std::cout << "Assemble";
-    else if (mode == CliMode::RUN) std::cout << "Run";
-    else if (mode == CliMode::ASSEMBLE_AND_RUN) std::cout << "Assemble and Run";
-    std::cout << std::endl;
-    std::cout << "Input file: " << input_file << std::endl;
-    if (mode == CliMode::ASSEMBLE) {
-        std::cout << "Output file: " << output_file << std::endl;
-    }
-
-    // Actual logic for selected mode
-    if (mode == CliMode::ASSEMBLE) {
-        std::ifstream ifs(input_file);
-        if (!ifs.is_open()) {
-            std::cerr << "Error: Could not open input file " << input_file << std::endl;
-            return 1;
+    switch (mode) {
+        case CliMode::ASSEMBLE: {
+            std::cout << "Mode: Assemble" << std::endl;
+            std::cout << "Input file: " << input_file << std::endl;
+            std::cout << "Output file: " << output_file << std::endl;
+            std::string assembly_code = read_source_file(input_file);
+            std::vector<uint16_t> bytecode = assemble(assembly_code);
+            write_bytecode(output_file, bytecode);
+            break;
         }
-        std::string assembly_code((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
-        ifs.close();
-
-        Parser parser;
-        parser.parse(assembly_code);
-        std::vector<uint16_t> bytecode = parser.get_bytecode();
-
-        std::ofstream ofs(output_file, std::ios::binary);
-        if (!ofs.is_open()) {
-            std::cerr << "Error: Could not open output file " << output_file << std::endl;
-            return 1;
+        case CliMode::RUN: {
+            std::cout << "Mode: Run" << std::endl;
+            std::cout << "Input file: " << input_file << std::endl;
+            std::vector<uint16_t> bytecode = read_bytecode_file(input_file);
+            run_vm(bytecode);
+            break;
         }
-        for (uint16_t instruction : bytecode) {
-            ofs.write(reinterpret_cast<const char*>(&instruction), sizeof(instruction));
+        case CliMode::ASSEMBLE_AND_RUN: {
+            std::cout << "Mode: Assemble and Run" << std::endl;
+            std::cout << "Input file: " << input_file << std::endl;
+            std::string assembly_code = read_source_file(input_file);
+            std::vector<uint16_t> bytecode = assemble(assembly_code);
+            run_vm(bytecode);
+            break;
         }
-        ofs.close();
-        std::cout << "Assembly successful. Bytecode written to " << output_file << std::endl;
-    } else if (mode == CliMode::RUN) {
-        std::ifstream ifs(input_file, std::ios::binary);
-        if (!ifs.is_open()) {
-            std::cerr << "Error: Could not open input bytecode file " << input_file << std::endl;
-            return 1;
-        }
-
-        std::vector<uint16_t> bytecode;
-        uint16_t instruction;
-        while (ifs.read(reinterpret_cast<char*>(&instruction), sizeof(instruction))) {
-            bytecode.push_back(instruction);
-        }
-        ifs.close();
-
-        vm dirt_vm(bytecode);
-        dirt_vm.run();
-        std::cout << "Execution finished." << std::endl;
-    } else if (mode == CliMode::ASSEMBLE_AND_RUN) {
-        std::ifstream ifs(input_file);
-        if (!ifs.is_open()) {
-            std::cerr << "Error: Could not open input file " << input_file << std::endl;
-            return 1;
-        }
-        std::string assembly_code((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
-        ifs.close();
-
-        Parser parser;
-        parser.parse(assembly_code);
-        std::vector<uint16_t> bytecode = parser.get_bytecode();
-
-        vm dirt_vm(bytecode);
-        dirt_vm.run();
-        std::cout << "Execution finished." << std::endl;
+        case CliMode::NONE:
+            // 이 경우는 이미 위에서 처리되었지만, 안전을 위해 추가합니다.
+            break;
     }
 
     return 0;

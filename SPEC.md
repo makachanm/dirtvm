@@ -136,7 +136,7 @@ These instructions push data that follows them in the bytecode stream onto the a
 pushd8 [010100] - One Type Instruction
 No arguments in the instruction word.
 
-명령어 뒤에 따라오는 8비트(1바이트) 데이터를 인자 스택에 집어넣습니다. 데이터는 16비트 워드에 패딩되어 저장되며, 상위 8비트는 무시됩니다. IP는 1워드만큼 증가합니다.
+명령어 뒤에 따라오는 8비트(1바이트) 데이터를 인자 스택에 집어넣습니다. 데이터는 16비트 워드로 패딩되어 저장됩니다. IP는 2워드(명령어 1워드 + 데이터 1워드)만큼 증가합니다.
 ```
 ```
 pushd16 [010101] - One Type Instruction

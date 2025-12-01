@@ -1,26 +1,25 @@
 #include "vm.h"
 #include <iostream> // For debugging, can be removed later
+#include <algorithm> // For std::max
 
 // Helper function to read a 128-bit address from the bytecode
 __uint128_t read_address(const std::vector<uint16_t>& bytecode, __uint128_t& pc) {
     __uint128_t address = 0;
     for (int i = 0; i < 8; ++i) {
-        address <<= 16;
-        if (static_cast<size_t>(pc) < bytecode.size()) {
-            address |= bytecode[pc++];
+        if (static_cast<size_t>(pc + i) < bytecode.size()) {
+            address |= (__uint128_t)bytecode[pc + i] << (16 * i);
         } else {
-            // Error: unexpected end of bytecode when reading an address
-            // This should be handled more gracefully
             std::cerr << "Unexpected end of bytecode when reading an address" << std::endl;
             return 0;
         }
     }
+    pc += 8;
     return address;
 }
 
-vm::vm(std::vector<uint16_t> bytecode) : raw_bytecode(std::move(bytecode)), pc(0) {
-    // Initialize memory, etc.
-    // For now, we assume memory is dynamically sized as needed.
+vm::vm(std::vector<uint16_t> bytecode)
+    : raw_bytecode(std::move(bytecode)), pc(0) {
+
 }
 
 vm::~vm() {
@@ -35,7 +34,7 @@ stack_data vm::pop() {
     if (stack.empty()) {
         // Error: stack underflow
         // This should be handled more gracefully
-        std::cerr << "stack underflow at " << std::endl;
+        std::cerr << "stack underflow at data stack" << std::endl;
         exit(1);
     }
     stack_data val = stack.top();
@@ -47,7 +46,7 @@ stack_data& vm::top() {
      if (stack.empty()) {
         // Error: stack underflow
         // This should be handled more gracefully
-        std::cerr << "stack underflow at " << std::endl;
+        std::cerr << "stack underflow at data stack" << std::endl;
         exit(1);
     }
     return stack.top();
@@ -100,13 +99,14 @@ void vm::run() {
             }
             case 0b001000: { // jmp
                 pc = read_address(raw_bytecode, pc);
-                break;
+                continue; // pc가 이미 설정되었으므로 루프의 끝에서 pc++를 건너뜁니다.
             }
             case 0b001001: { // jz
                 __uint128_t dest = read_address(raw_bytecode, pc);
                 stack_data val = pop();
                 if (val.get_data() == 0) {
                     pc = dest;
+                    continue;
                 }
                 break;
             }
@@ -115,6 +115,7 @@ void vm::run() {
                 stack_data val = pop();
                 if (val.get_data() != 0) {
                     pc = dest;
+                    continue;
                 }
                 break;
             }
@@ -122,7 +123,7 @@ void vm::run() {
                 __uint128_t dest = read_address(raw_bytecode, pc);
                 call_stack.push(pc);
                 pc = dest;
-                break;
+                continue; // pc가 이미 설정되었으므로 루프의 끝에서 pc++를 건너뜁니다.
             }
             case 0b001100: { // ret
                 if (call_stack.empty()) {
@@ -196,52 +197,54 @@ void vm::run() {
                 local_memory[tag][static_cast<size_t>(address)] = val;
                 break;
             }
-             case 0b010100: { // pushd8
+            case 0b010100: { // pushd8
                 push(stack_data(D_TYPE::BIT_8, raw_bytecode[pc] & 0xFF));
-                pc += 1;
+                pc += 1; // Consume data word
                 break;
             }
             case 0b010101: { // pushd16
                 push(stack_data(D_TYPE::BIT_16, raw_bytecode[pc]));
-                pc += 1;
+                pc += 1; // 데이터 1워드.
                 break;
             }
             case 0b010110: { // pushd32
-                __uint128_t data = raw_bytecode[pc + 1];
-                data <<= 16;
-                data |= raw_bytecode[pc];
+                __uint128_t data = 0;
+                for(int i = 1; i >= 0; i--) {
+                    data <<= 16;
+                    data |= raw_bytecode[pc + i];
+                }
                 push(stack_data(D_TYPE::BIT_32, data));
-                pc += 2;
+                pc += 2; // 데이터 2워드.
                 break;
             }
             case 0b010111: { // pushd64
                 __uint128_t data = 0;
-                for(int i = 3; i >= 0; i--) {
+                for(int i = 0; i < 4; i++) {
                     data <<= 16;
-                    data |= raw_bytecode[pc + i];
+                    data |= raw_bytecode[pc + (3-i)];
                 }
                 push(stack_data(D_TYPE::BIT_64, data));
-                pc += 4;
+                pc += 4; // 데이터 4워드.
                 break;
             }
             case 0b011000: { // pushd128
                 __uint128_t data = 0;
-                 for(int i = 7; i >= 0; i--) {
+                 for(int i = 0; i < 8; i++) {
                     data <<= 16;
-                    data |= raw_bytecode[pc + i];
+                    data |= raw_bytecode[pc + (7-i)];
                 }
                 push(stack_data(D_TYPE::BIT_128, data));
-                pc += 8;
+                pc += 8; // 데이터 8워드.
                 break;
             }
             case 0b011001: { // syscall
-                handle_syscall();
+                handle_syscall(operand1);
                 break;
             }
             default:
                 // Unknown opcode
                 std::cerr << "Unknown opcode: " << std::hex << (int)opcode << std::endl;
-                return; // or exit, or throw an exception
+                continue; // or exit, or throw an exception
         }
     }
 }

@@ -6,9 +6,8 @@
 #include "vm.h"
 #include "object.h"
 
-void vm::handle_syscall() {
-    stack_data syscall_num_data = pop();
-    long syscall_num = (long)syscall_num_data.get_data();
+void vm::handle_syscall(uint16_t operand1) {
+    long syscall_num = operand1;
     long ret = 0;
 
     switch (syscall_num) {
